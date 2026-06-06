@@ -9,13 +9,12 @@ from aiogram.types import Message, CallbackQuery, ReplyKeyboardMarkup, KeyboardB
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
-from dotenv import load_dotenv
 
-from knowledge_base import init_faq_table, search_faq, add_faq, get_all_faq, delete_faq, fill_default_faq
+# ========== ТОКЕН БОТА (ВСТАВЬТЕ СВОЙ) ==========
+BOT_TOKEN = "8660466323:AAHKGwCNkz5tD2ZA4l_0f-pPiMdaj3_H_so"  # Пример: "5826884420:AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw"
 
-load_dotenv()
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-ADMIN_IDS = [int(x.strip()) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip()]
+# ========== ID АДМИНИСТРАТОРОВ ==========
+ADMIN_IDS = [5826884420,1669539257]  # Ваш Telegram ID
 
 CHANNELS = {
     "mama_dychi": "https://t.me/mama_dychi",
@@ -24,7 +23,7 @@ CHANNELS = {
 
 DB_NAME = "database.db"
 
-# ========== БАЗОВАЯ ТАБЛИЦА ПОЛЬЗОВАТЕЛЕЙ И ВОПРОСОВ ==========
+# ========== БАЗОВАЯ ТАБЛИЦА ==========
 def init_db():
     conn = sqlite3.connect(DB_NAME)
     cur = conn.cursor()
@@ -124,6 +123,128 @@ def get_user_info(user_id):
         return {"full_name": full_name or "Не указано", "username": username, "mention": mention}
     return {"full_name": "Пользователь", "username": None, "mention": f"[Пользователь](tg://user?id={user_id})"}
 
+# ========== БАЗА ЗНАНИЙ (FAQ) ==========
+def init_faq_table():
+    conn = sqlite3.connect(DB_NAME)
+    cur = conn.cursor()
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS faq (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            question TEXT NOT NULL UNIQUE,
+            answer TEXT NOT NULL,
+            keywords TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_question ON faq (question)")
+    conn.commit()
+    conn.close()
+
+def add_faq(question: str, answer: str) -> bool:
+    conn = sqlite3.connect(DB_NAME)
+    cur = conn.cursor()
+    import re
+    keywords = ' '.join([w for w in re.findall(r'\b\w+\b', question.lower()) if len(w) > 3])
+    try:
+        cur.execute(
+            "INSERT INTO faq (question, answer, keywords) VALUES (?, ?, ?)",
+            (question, answer, keywords)
+        )
+        conn.commit()
+        return True
+    except sqlite3.IntegrityError:
+        return False
+    finally:
+        conn.close()
+
+def search_faq(query: str):
+    conn = sqlite3.connect(DB_NAME)
+    cur = conn.cursor()
+    import re
+    query_lower = query.lower().strip()
+    cur.execute("SELECT answer FROM faq WHERE LOWER(question) = ?", (query_lower,))
+    row = cur.fetchone()
+    if row:
+        conn.close()
+        return row[0]
+    words = [w for w in re.findall(r'\b\w+\b', query_lower) if len(w) > 3]
+    if not words:
+        conn.close()
+        return None
+    like_conditions = ' OR '.join(['keywords LIKE ?'] * len(words))
+    like_params = [f'%{w}%' for w in words]
+    cur.execute(f"SELECT answer FROM faq WHERE {like_conditions} LIMIT 1", like_params)
+    row = cur.fetchone()
+    conn.close()
+    return row[0] if row else None
+
+def get_all_faq():
+    conn = sqlite3.connect(DB_NAME)
+    cur = conn.cursor()
+    cur.execute("SELECT id, question, answer FROM faq ORDER BY id")
+    rows = cur.fetchall()
+    conn.close()
+    return rows
+
+def delete_faq(faq_id: int) -> bool:
+    conn = sqlite3.connect(DB_NAME)
+    cur = conn.cursor()
+    cur.execute("DELETE FROM faq WHERE id = ?", (faq_id,))
+    conn.commit()
+    deleted = cur.rowcount > 0
+    conn.close()
+    return deleted
+
+def is_faq_empty() -> bool:
+    conn = sqlite3.connect(DB_NAME)
+    cur = conn.cursor()
+    cur.execute("SELECT COUNT(*) FROM faq")
+    count = cur.fetchone()[0]
+    conn.close()
+    return count == 0
+
+# 30 частых вопросов
+DEFAULT_FAQ = [
+    ("Как наладить сон ребёнка?", "😴 **Как наладить сон ребёнка?**\n\n• Установите ритуал (купание, сказка)\n• Тёмная комната + белый шум\n• Не перегревайте (20-22°C)\n• Сытый малыш спит лучше"),
+    ("Проблемы с грудным вскармливанием", "🍼 **Проблемы ГВ:**\n\n• Прикладывайте по требованию\n• Следите за захватом\n• Пейте тёплое перед кормлением"),
+    ("С чего начать прикорм?", "🥄 **Начало прикорма:**\n\n• С 6 месяцев\n• Начинайте с овощей\n• Новый продукт раз в 3 дня"),
+    ("Что делать при коликах?", "😖 **Колики:**\n\n• Выкладывайте на живот\n• Тёплая пелёнка\n• Массаж по часовой стрелке"),
+    ("Температура у ребёнка", "🌡️ **Температура:**\n\n• До 38°C не сбивайте\n• Обильное питьё\n• Выше 38.5°C — жаропонижающее"),
+    ("Развитие в 3 месяца", "👶 **Развитие в 3 месяца:**\n\n• Улыбается\n• Держит голову\n• Гулит"),
+    ("Развитие в 6 месяцев", "🧸 **Развитие в 6 месяцев:**\n\n• Сидит\n• Переворачивается\n• Тянет всё в рот"),
+    ("Развитие в 1 год", "🎉 **Развитие в 1 год:**\n\n• Ходит\n• Говорит 2-10 слов\n• Показывает части тела"),
+    ("Аллергия у грудничка", "🤧 **Аллергия:**\n\n• Сыпь на щеках\n• Ведите пищевой дневник\n• К врачу-аллергологу"),
+    ("Запор у малыша", "💩 **Запор:**\n\n• Больше жидкости\n• Массаж живота\n• Чернослив (с 6 мес)"),
+    ("Сколько гулять?", "☀️ **Прогулки:**\n\n• 1.5-4 часа в день\n• Одевайте по погоде +1 слой"),
+    ("Пустышка: за и против", "🍼 **Пустышка:**\n\n• До 6 месяцев — можно\n• После года — отучаем"),
+    ("Что делать при истерике?", "😭 **Истерика:**\n\n• Сохраняйте спокойствие\n• Переключите внимание\n• Обнимите после"),
+    ("Когда лезут зубы?", "🦷 **Зубы:**\n\n• Первые зубы: 6-8 месяцев\n• Прорезыватели в помощь"),
+    ("Нужен ли развивающий коврик?", "🧩 **Коврик:**\n\n• Да, с 2-3 месяцев\n• Развивает сенсорику"),
+    ("Экранное время для детей", "📱 **Экранное время:**\n\n• До 2 лет не рекомендуется\n• Альтернатива: книги, игры"),
+    ("Как не кричать на ребёнка?", "👩‍👧 **Как не кричать:**\n\n• Сделайте глубокий вдох\n• Выйдите из комнаты\n• Хвалите за хорошее поведение"),
+    ("Как вовлечь папу?", "👨‍👦 **Вовлечь папу:**\n\n• Оставьте их вдвоём\n• Доверьте купание/прогулку\n• Хвалите за помощь"),
+    ("Мама, выдохни! (отдых)", "🧘 **Мама, выдохни:**\n\n• Сон, когда спит ребёнок\n• 15 минут на себя\n• Просите помощь"),
+    ("Список в роддом", "🏥 **Список в роддом:**\n\n• Документы\n• Вещи для малыша\n• Вещи для мамы"),
+    ("Прививки детям", "💉 **Прививки:**\n\n• По календарю\n• Ребёнок должен быть здоров"),
+    ("Как выбрать смесь?", "🍼 **Смесь:**\n\n• Только по рекомендации педиатра\n• Для новорожденных 0-6"),
+    ("Путешествуем с малышом", "✈️ **Путешествия:**\n\n• В самолёт с 7 дней\n• Аптечка + запасная одежда"),
+    ("Полезные курсы для мам", "📚 **Курсы:**\n\n• Наш канал @mama_dychi\n• Школа материнства"),
+    ("Детская аптечка", "🚑 **Аптечка:**\n\n• Жаропонижающее\n• Антигистаминное\n• От колик\n• Зелёнка, бинт"),
+    ("Как подготовиться к визиту к врачу?", "👩‍⚕️ **К врачу:**\n\n• Список вопросов\n• Запишите симптомы\n• Игрушка для отвлечения"),
+    ("Слинг: плюсы", "🪢 **Слинг:**\n\n• Руки свободны\n• Успокаивает малыша\n• С консультантом безопаснее"),
+    ("Ребёнок плохо спит ночью", "🌙 **Ночной сон:**\n\n• Проверьте зубы/живот\n• Ритуал перед сном"),
+    ("Массаж для малыша", "💆‍♀️ **Массаж:**\n\n• С 1 месяца\n• До еды или через час"),
+    ("Как научить ребёнка засыпать самостоятельно?", "😴 **Самостоятельное засыпание:**\n\n• Метод «Посиди рядом»\n• Ритуал каждый день\n• Терпение 1-2 недели")
+]
+
+def fill_default_faq():
+    if is_faq_empty():
+        for q, a in DEFAULT_FAQ:
+            add_faq(q, a)
+        print("✅ База знаний заполнена 30 частыми вопросами.")
+    else:
+        print("ℹ️ База знаний уже содержит данные.")
+
 # ========== КЛАВИАТУРЫ ==========
 def get_main_keyboard(user_id):
     buttons = [
@@ -162,17 +283,19 @@ def get_answer_inline(q_id):
         [InlineKeyboardButton(text="✅ Закрыть", callback_data=f"close_{q_id}")]
     ])
 
-def get_faq_inline_keyboard():
-    """Создаёт инлайн-клавиатуру из всех вопросов в FAQ (по 2 кнопки в ряд)"""
-    faqs = get_all_faq()
-    if not faqs:
-        return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="📭 FAQ пуст", callback_data="faq_empty")]])
-    buttons = []
-    for fid, q, a in faqs:
-        # Ограничим длину текста кнопки
-        short_q = q[:40] + "..." if len(q) > 40 else q
-        buttons.append([InlineKeyboardButton(text=short_q, callback_data=f"faq_{fid}")])
-    return InlineKeyboardMarkup(inline_keyboard=buttons)
+def get_faq_inline_menu():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="😴 Сон малыша", callback_data="faq_сон")],
+        [InlineKeyboardButton(text="🍼 Грудное вскармливание", callback_data="faq_грудное вскармливание")],
+        [InlineKeyboardButton(text="🥄 Прикорм", callback_data="faq_прикорм")],
+        [InlineKeyboardButton(text="😖 Колики", callback_data="faq_колики")],
+        [InlineKeyboardButton(text="🌡️ Температура", callback_data="faq_температура")],
+        [InlineKeyboardButton(text="👶 Развитие по месяцам", callback_data="faq_развитие")],
+        [InlineKeyboardButton(text="🤧 Аллергия", callback_data="faq_аллергия")],
+        [InlineKeyboardButton(text="💩 Запор", callback_data="faq_запор")],
+        [InlineKeyboardButton(text="🦷 Зубы", callback_data="faq_зубы")],
+        [InlineKeyboardButton(text="📖 Все ответы", callback_data="faq_all")]
+    ])
 
 # ========== FSM ==========
 class AskQuestion(StatesGroup):
@@ -205,9 +328,9 @@ async def cmd_start(message: Message):
         "🌸 **«Мама, дыши и улыбайся»** и **«Детки на заметку»** — твоё безопасное пространство.\n\n"
         "✨ Что я умею:\n"
         "• ❓ Задать вопрос куратору (опытные мамы ответят)\n"
-        "• 📚 Готовые ответы на частые вопросы (более 30 тем)\n"
-        "• 🛍️ Рекомендации лучших товаров для детей (в разработке)\n"
-        "• 🧘 Упражнения и советы для восстановления (в разработке)\n"
+        "• 📚 Готовые ответы на частые вопросы\n"
+        "• 🛍️ Рекомендации лучших товаров для детей\n"
+        "• 🧘 Упражнения и советы для восстановления\n"
         "• 💬 Анонимная поддержка — выговориться без страха\n\n"
         "👇 Выбирай нужный раздел!",
         reply_markup=get_main_keyboard(message.from_user.id)
@@ -218,11 +341,43 @@ async def cancel_cmd(message: Message, state: FSMContext):
     await state.clear()
     await message.answer("❌ Действие отменено.", reply_markup=get_main_keyboard(message.from_user.id))
 
-# --- ЗАДАТЬ ВОПРОС С АВТООТВЕТОМ ИЗ FAQ ---
+# --- ЧАСТЫЕ ВОПРОСЫ ---
+@dp.message(F.text == "📚 Частые вопросы мам")
+async def show_faq_menu(message: Message):
+    await message.answer(
+        "📖 **Частые вопросы мам**\n\n👇 Выберите тему:",
+        reply_markup=get_faq_inline_menu()
+    )
+
+@dp.callback_query(F.data.startswith("faq_"))
+async def handle_faq_callback(callback: CallbackQuery):
+    topic = callback.data.split("_", 1)[1]
+    
+    if topic == "all":
+        faqs = get_all_faq()
+        if not faqs:
+            await callback.message.answer("📭 База знаний пока пуста.")
+        else:
+            text = "📚 **Все вопросы:**\n\n"
+            for fid, q, _ in faqs[:30]:
+                text += f"• {q}\n"
+            text += "\n🔍 Напишите ключевое слово для поиска!"
+            await callback.message.answer(text)
+        await callback.answer()
+        return
+    
+    answer = search_faq(topic)
+    if answer:
+        await callback.message.answer(answer)
+    else:
+        await callback.message.answer("🔍 Не нашли? Задайте вопрос куратору через меню.")
+    await callback.answer()
+
+# --- ЗАДАТЬ ВОПРОС ---
 @dp.message(F.text == "❓ Задать вопрос куратору")
 async def ask_question(message: Message, state: FSMContext):
     await state.set_state(AskQuestion.waiting_for_question)
-    await message.answer("📝 Напишите ваш вопрос. Я сначала поищу ответ в базе знаний. Если не найду — передам куратору.\n\nОтменить: /cancel")
+    await message.answer("📝 Напишите вопрос. Я поищу ответ в базе. Если не найду — передам куратору.\nОтменить: /cancel")
 
 @dp.message(AskQuestion.waiting_for_question)
 async def process_question(message: Message, state: FSMContext):
@@ -234,28 +389,27 @@ async def process_question(message: Message, state: FSMContext):
     user_question = message.text
     answer = search_faq(user_question)
     if answer:
-        await message.answer(f"📖 **Нашёл ответ в базе знаний:**\n\n{answer}\n\n👍 Помогло? Если нет — просто задай вопрос ещё раз, я передам куратору.")
+        await message.answer(f"📖 **Нашёл ответ:**\n\n{answer}\n\n👍 Помогло?")
         await state.clear()
         return
     
     q_id = save_question(message.from_user.id, user_question)
     await state.clear()
-    await message.answer("✅ Вопрос не найден в базе. Я передал его куратору. Ответ придёт в этот чат.\n🌱 Спасибо за доверие!")
+    await message.answer("✅ Вопрос передан куратору. Ответ придёт сюда.")
     
     user_info = get_user_info(message.from_user.id)
     for admin_id in ADMIN_IDS:
         await bot.send_message(
             admin_id,
-            f"🔔 **Новый вопрос от мамы** (не найден в FAQ)\n\n"
+            f"🔔 **Новый вопрос!**\n\n"
             f"👤 **От:** {user_info['mention']}\n"
-            f"📛 **Имя:** {user_info['full_name']}\n"
-            f"🆔 **ID:** `{message.from_user.id}`\n\n"
+            f"📛 **Имя:** {user_info['full_name']}\n\n"
             f"💬 **Вопрос:**\n_{user_question}_",
             parse_mode="Markdown",
             reply_markup=get_question_inline(q_id)
         )
 
-# --- ОТВЕТЫ АДМИНА И ДОБАВЛЕНИЕ В FAQ ---
+# --- ОТВЕТЫ АДМИНА ---
 @dp.callback_query(F.data.startswith("answer_"))
 async def admin_answer_start(callback: CallbackQuery, state: FSMContext):
     if not is_admin(callback.from_user.id):
@@ -264,7 +418,7 @@ async def admin_answer_start(callback: CallbackQuery, state: FSMContext):
     q_id = int(callback.data.split("_")[1])
     await state.update_data(answer_qid=q_id)
     await state.set_state(AnswerFlow.waiting_for_answer)
-    await callback.message.answer("✏️ Напишите ответ на этот вопрос:")
+    await callback.message.answer("✏️ Напишите ответ:")
     await callback.answer()
 
 @dp.message(AnswerFlow.waiting_for_answer)
@@ -275,10 +429,10 @@ async def admin_answer_process(message: Message, state: FSMContext):
     user_id = answer_question(q_id, answer_text, message.from_user.id)
     
     await bot.send_message(user_id, f"📬 **Ответ куратора:**\n\n{answer_text}")
-    await message.answer("✅ Ответ отправлен пользователю.")
+    await message.answer("✅ Ответ отправлен.")
     
     await message.answer(
-        "📚 Хотите добавить этот вопрос и ответ в базу знаний, чтобы в будущем бот отвечал автоматически?",
+        "📚 Добавить в базу знаний?",
         reply_markup=get_answer_inline(q_id)
     )
     await state.clear()
@@ -299,11 +453,9 @@ async def add_to_faq_callback(callback: CallbackQuery):
         success = add_faq(question, answer)
         if success:
             mark_added_to_faq(q_id)
-            await callback.message.answer("✅ Вопрос и ответ добавлены в базу знаний! Теперь бот будет отвечать на подобные вопросы автоматически.")
+            await callback.message.answer("✅ Добавлено в базу знаний!")
         else:
-            await callback.message.answer("⚠️ Такая пара уже есть в базе знаний.")
-    else:
-        await callback.message.answer("❌ Ошибка: вопрос не найден.")
+            await callback.message.answer("⚠️ Уже есть в базе.")
     await callback.answer()
 
 @dp.callback_query(F.data.startswith("close_"))
@@ -313,13 +465,10 @@ async def close_callback(callback: CallbackQuery):
 
 @dp.callback_query(F.data.startswith("skip_"))
 async def admin_skip(callback: CallbackQuery):
-    if not is_admin(callback.from_user.id):
-        await callback.answer("Нет прав")
-        return
-    await callback.message.answer("⏩ Вопрос пропущен.")
+    await callback.message.answer("⏩ Пропущено.")
     await callback.answer()
 
-# --- УПРАВЛЕНИЕ FAQ ДЛЯ АДМИНА ---
+# --- УПРАВЛЕНИЕ FAQ ---
 @dp.message(F.text == "📚 Управление FAQ")
 async def manage_faq(message: Message):
     if not is_admin(message.from_user.id):
@@ -327,240 +476,137 @@ async def manage_faq(message: Message):
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="➕ Добавить вручную", callback_data="manual_add_faq")],
         [InlineKeyboardButton(text="📋 Список FAQ", callback_data="list_faq")],
-        [InlineKeyboardButton(text="🗑 Удалить запись", callback_data="delete_faq")]
+        [InlineKeyboardButton(text="🗑 Удалить", callback_data="delete_faq")]
     ])
-    await message.answer("📚 **Управление базой знаний**\n\nВыберите действие:", reply_markup=kb)
+    await message.answer("📚 Управление базой знаний:", reply_markup=kb)
 
 @dp.callback_query(F.data == "manual_add_faq")
-async def manual_add_faq_start(callback: CallbackQuery, state: FSMContext):
-    if not is_admin(callback.from_user.id):
-        await callback.answer("Нет прав")
-        return
+async def manual_add_start(callback: CallbackQuery, state: FSMContext):
     await state.set_state(ManualFAQ.waiting_question)
-    await callback.message.answer("✏️ Введите вопрос (как его будут задавать пользователи):")
+    await callback.message.answer("Введите вопрос:")
     await callback.answer()
 
 @dp.message(ManualFAQ.waiting_question)
-async def manual_add_faq_question(message: Message, state: FSMContext):
+async def manual_question(message: Message, state: FSMContext):
     await state.update_data(faq_question=message.text)
     await state.set_state(ManualFAQ.waiting_answer)
-    await message.answer("✏️ Введите ответ на этот вопрос:")
+    await message.answer("Введите ответ:")
 
 @dp.message(ManualFAQ.waiting_answer)
-async def manual_add_faq_answer(message: Message, state: FSMContext):
+async def manual_answer(message: Message, state: FSMContext):
     data = await state.get_data()
-    question = data["faq_question"]
-    answer = message.text
-    success = add_faq(question, answer)
-    if success:
-        await message.answer("✅ Новая пара вопрос-ответ добавлена в базу знаний!")
-    else:
-        await message.answer("⚠️ Такой вопрос уже существует.")
+    success = add_faq(data["faq_question"], message.text)
+    await message.answer("✅ Добавлено!" if success else "⚠️ Уже есть")
     await state.clear()
 
 @dp.callback_query(F.data == "list_faq")
-async def list_faq_callback(callback: CallbackQuery):
-    if not is_admin(callback.from_user.id):
-        await callback.answer("Нет прав")
-        return
+async def list_faq(callback: CallbackQuery):
     faqs = get_all_faq()
     if not faqs:
-        await callback.message.answer("📭 База знаний пуста.")
+        await callback.message.answer("📭 База пуста.")
     else:
-        text = "📚 **Список FAQ:**\n\n"
-        for fid, q, a in faqs[:20]:
-            text += f"{fid}. {q[:60]}...\n"
-        text += "\nДля удаления используйте кнопку «Удалить запись»."
+        text = "📚 **FAQ:**\n\n"
+        for fid, q, _ in faqs[:20]:
+            text += f"{fid}. {q[:50]}...\n"
         await callback.message.answer(text)
     await callback.answer()
 
 @dp.callback_query(F.data == "delete_faq")
-async def delete_faq_start(callback: CallbackQuery):
-    if not is_admin(callback.from_user.id):
-        await callback.answer("Нет прав")
-        return
+async def delete_start(callback: CallbackQuery):
     faqs = get_all_faq()
     if not faqs:
-        await callback.message.answer("Нет записей для удаления.")
+        await callback.message.answer("Нет записей.")
         await callback.answer()
         return
-    kb_buttons = []
-    for fid, q, _ in faqs[:20]:
-        kb_buttons.append([InlineKeyboardButton(text=f"{fid}. {q[:40]}...", callback_data=f"del_faq_{fid}")])
-    kb = InlineKeyboardMarkup(inline_keyboard=kb_buttons)
-    await callback.message.answer("🗑 Выберите ID записи для удаления:", reply_markup=kb)
+    buttons = [[InlineKeyboardButton(text=f"{fid}. {q[:40]}...", callback_data=f"del_faq_{fid}")] for fid, q, _ in faqs[:20]]
+    await callback.message.answer("🗑 Выберите ID для удаления:", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
     await callback.answer()
 
 @dp.callback_query(F.data.startswith("del_faq_"))
-async def confirm_delete_faq(callback: CallbackQuery):
-    if not is_admin(callback.from_user.id):
-        await callback.answer("Нет прав")
-        return
+async def delete_faq_callback(callback: CallbackQuery):
     faq_id = int(callback.data.split("_")[2])
     delete_faq(faq_id)
     await callback.message.answer(f"✅ Запись #{faq_id} удалена.")
     await callback.answer()
 
-# --- ЧАСТЫЕ ВОПРОСЫ (инлайн-меню) ---
-@dp.message(F.text == "📚 Частые вопросы мам")
-async def show_faq_menu(message: Message):
-    await message.answer(
-        "📖 **Выберите интересующий вопрос из списка ниже:**\n\n"
-        "👇 Нажмите на кнопку с вопросом, чтобы увидеть ответ.\n"
-        "Если не нашли нужный, воспользуйтесь поиском по ключевому слову или задайте вопрос куратору.",
-        reply_markup=get_faq_inline_keyboard()
-    )
-
-@dp.callback_query(F.data.startswith("faq_"))
-async def handle_faq_callback(callback: CallbackQuery):
-    data = callback.data
-    if data == "faq_empty":
-        await callback.answer("База знаний пока пуста.", show_alert=True)
-        return
-    # формат: faq_{id}
-    faq_id = int(data.split("_")[1])
-    conn = sqlite3.connect(DB_NAME)
-    cur = conn.cursor()
-    cur.execute("SELECT question, answer FROM faq WHERE id = ?", (faq_id,))
-    row = cur.fetchone()
-    conn.close()
-    if row:
-        question, answer = row
-        await callback.message.answer(f"**❓ {question}**\n\n{answer}", parse_mode="Markdown")
-    else:
-        await callback.message.answer("❌ Ответ не найден.")
-    await callback.answer()
-
-# --- ТОВАРЫ И РЕЦЕНЗИИ (заглушка) ---
+# --- ОСТАЛЬНЫЕ КНОПКИ ---
 @dp.message(F.text == "🛍️ Товары и рецензии")
 async def products(message: Message):
-    await message.answer(
-        "🛒 **Раздел «Товары и рецензии» скоро появится!**\n\n"
-        "🚧 Пока мы собираем лучшие рекомендации и отзывы мам.\n"
-        "🌟 Следите за обновлениями в нашем канале.\n\n"
-        "А пока вы можете задать вопрос куратору о любом товаре — опытные мамы подскажут!"
-    )
+    await message.answer("🛍️ **Товары и рецензии**\n\n🚧 Раздел в разработке. Скоро здесь появятся рекомендации лучших товаров для детей и отзывы мам!")
 
-# --- ПОДДЕРЖКА И ЗАБОТА (заглушка) ---
 @dp.message(F.text == "🧘 Поддержка и забота")
 async def support(message: Message):
-    await message.answer(
-        "🧘 **Раздел «Поддержка и забота» в разработке!**\n\n"
-        "🌱 Здесь скоро появятся:\n"
-        "• Дыхательные практики и упражнения\n"
-        "• Советы психолога\n"
-        "• Истории мам, которые прошли через трудности\n\n"
-        "✨ А пока вы можете воспользоваться кнопкой «💬 Поговорить с куратором» — мы всегда рядом."
-    )
+    await message.answer("🧘 **Поддержка и забота**\n\n🚧 Раздел в разработке. Скоро здесь появятся дыхательные практики, упражнения и советы психолога!")
 
-# --- НАШИ КАНАЛЫ ---
 @dp.message(F.text == "📢 Наши каналы")
-async def our_channels(message: Message):
-    text = (
-        "📢 **Наши проекты для мам:**\n\n"
-        f"🌸 [Мама, дыши и улыбайся]({CHANNELS['mama_dychi']}) — поддержка, дыхательные практики, посты о материнстве\n\n"
-        f"📘 [Детки на заметку]({CHANNELS['detky_nazametky']}) — развитие, здоровье, лайфхаки для мам\n\n"
-        "🔔 **Подпишись, чтобы не пропустить:**\n"
-        "• Бесплатные вебинары\n"
-        "• Розыгрыши товаров для детей\n"
-        "• Анонсы встреч мам\n\n"
-        "🤱 Здесь тебя понимают и ждут!"
-    )
-    await message.answer(text, parse_mode="Markdown")
+async def channels(message: Message):
+    await message.answer(f"📢 **Наши каналы:**\n\n🌸 [Мама, дыши и улыбайся]({CHANNELS['mama_dychi']})\n📘 [Детки на заметку]({CHANNELS['detky_nazametky']})", parse_mode="Markdown")
 
-# --- ЖИВОЙ ЧАТ С КУРАТОРОМ ---
 @dp.message(F.text == "💬 Поговорить с куратором")
 async def live_chat_start(message: Message, state: FSMContext):
     await state.set_state(LiveChat.waiting)
-    await message.answer("💬 Напишите своё сообщение. Куратор ответит в ближайшее время.\nОтменить: /cancel")
+    await message.answer("💬 Напишите сообщение. Куратор ответит.\nОтменить: /cancel")
 
 @dp.message(LiveChat.waiting)
-async def process_live_chat(message: Message, state: FSMContext):
-    if message.text and message.text.strip().lower() == "/cancel":
+async def live_chat(message: Message, state: FSMContext):
+    if message.text == "/cancel":
         await state.clear()
-        await message.answer("❌ Отменено.", reply_markup=get_main_keyboard(message.from_user.id))
+        await message.answer("❌ Отменено.")
         return
     await state.clear()
-    await message.answer("✅ Сообщение передано куратору. Ответ придёт сюда.")
+    await message.answer("✅ Сообщение передано.")
     user_info = get_user_info(message.from_user.id)
     for admin_id in ADMIN_IDS:
-        await bot.send_message(
-            admin_id,
-            f"💌 **Сообщение от мамы**\n\n"
-            f"👤 **От:** {user_info['mention']}\n"
-            f"📛 **Имя:** {user_info['full_name']}\n"
-            f"🆔 **ID:** `{message.from_user.id}`\n\n"
-            f"💬 **Текст:**\n_{message.text}_",
-            parse_mode="Markdown"
-        )
+        await bot.send_message(admin_id, f"💌 Сообщение от {user_info['mention']}:\n{message.text}")
 
-# --- О ПРОЕКТЕ ---
 @dp.message(F.text == "ℹ️ О проекте")
-async def about_project(message: Message):
-    text = (
-        "✨ **О проекте**\n\n"
-        "«Мама, дыши и улыбайся» — канал, где мамы делятся опытом, поддерживают друг друга и напоминают: ты справляешься!\n"
-        "«Детки на заметку» — полезности о здоровье, развитии и воспитании детей.\n\n"
-        "🤖 **Этот бот** — твой помощник:\n"
-        "• Задай вопрос куратору\n"
-        "• Найди готовый ответ в базе из 30+ тем\n"
-        "• Получи рекомендации товаров (скоро)\n"
-        "• Освоишь дыхательные практики (скоро)\n"
-        "• Просто выговорись\n\n"
-        "📌 **Контакты:**\n"
-        "По вопросам сотрудничества: @ваш_логин (укажите свой)\n\n"
-        "🌸 Ты — лучшая мама для своего ребёнка!"
-    )
-    await message.answer(text)
+async def about(message: Message):
+    await message.answer("✨ **О проекте**\n\n«Мама, дыши и улыбайся» и «Детки на заметку» — каналы поддержки мам.\n\n🤖 Бот помогает:\n• Задать вопрос\n• Найти ответ\n• Получить поддержку\n\n🌸 Ты — лучшая мама!")
 
 # --- АДМИН-ПАНЕЛЬ ---
 @dp.message(F.text == "👑 Админ-панель")
 async def admin_panel(message: Message):
     if not is_admin(message.from_user.id):
         return
-    await message.answer("👑 Добро пожаловать в админ-панель", reply_markup=admin_kb)
+    await message.answer("👑 Админ-панель", reply_markup=admin_kb)
 
 @dp.message(F.text == "📋 Неотвеченные вопросы")
-async def admin_unanswered(message: Message):
+async def unanswered(message: Message):
     if not is_admin(message.from_user.id):
         return
     questions = get_unanswered_questions()
     if not questions:
-        await message.answer("🎉 Нет неотвеченных вопросов!")
+        await message.answer("🎉 Нет вопросов!")
         return
     for q_id, q_text, asked_by in questions:
         user_info = get_user_info(asked_by)
-        await message.answer(
-            f"📝 **Вопрос #{q_id}**\nОт: {user_info['mention']}\n\n{q_text}",
-            parse_mode="Markdown",
-            reply_markup=get_question_inline(q_id)
-        )
+        await message.answer(f"📝 Вопрос #{q_id}\nОт: {user_info['mention']}\n\n{q_text}", parse_mode="Markdown", reply_markup=get_question_inline(q_id))
 
 @dp.message(F.text == "📈 Статистика")
-async def admin_stats(message: Message):
+async def stats(message: Message):
     if not is_admin(message.from_user.id):
         return
     users, total_q, answered_q = get_stats()
-    await message.answer(f"📊 **Статистика**\n👥 Пользователей: {users}\n❓ Всего вопросов: {total_q}\n✅ Отвечено: {answered_q}")
+    await message.answer(f"📊 Статистика\n👥 Пользователей: {users}\n❓ Вопросов: {total_q}\n✅ Отвечено: {answered_q}")
 
 @dp.message(F.text == "➕ Создать опрос")
-async def admin_create_poll(message: Message, state: FSMContext):
+async def create_poll(message: Message, state: FSMContext):
     if not is_admin(message.from_user.id):
         return
     await state.set_state(PollCreation.waiting_question)
     await message.answer("Введите вопрос для опроса:")
 
 @dp.message(PollCreation.waiting_question)
-async def poll_question(message: Message, state: FSMContext):
+async def poll_q(message: Message, state: FSMContext):
     await state.update_data(poll_q=message.text)
     await state.set_state(PollCreation.waiting_options)
     await message.answer("Введите варианты через запятую (пример: Да, Нет, Не знаю)")
 
 @dp.message(PollCreation.waiting_options)
-async def poll_options(message: Message, state: FSMContext):
+async def poll_opts(message: Message, state: FSMContext):
     options = [opt.strip() for opt in message.text.split(",") if opt.strip()]
     if len(options) < 2:
-        await message.answer("❌ Нужно минимум 2 варианта. Попробуйте снова.")
+        await message.answer("❌ Минимум 2 варианта.")
         return
     data = await state.get_data()
     await state.clear()
@@ -568,27 +614,16 @@ async def poll_options(message: Message, state: FSMContext):
     await message.answer("✅ Опрос отправлен!")
 
 @dp.message(F.text == "🔙 В главное меню")
-async def back_to_main(message: Message, state: FSMContext):
+async def back_main(message: Message, state: FSMContext):
     await state.clear()
-    await message.answer("Возврат в главное меню", reply_markup=get_main_keyboard(message.from_user.id))
-
-# --- ПОИСК ПО КЛЮЧЕВЫМ СЛОВАМ (если пользователь просто пишет текст) ---
-@dp.message(F.text, ~StateFilter(AskQuestion.waiting_for_question, AnswerFlow.waiting_for_answer, PollCreation.waiting_question, PollCreation.waiting_options, ManualFAQ.waiting_question, ManualFAQ.waiting_answer, LiveChat.waiting))
-async def free_text_search(message: Message):
-    if message.text in ["❓ Задать вопрос куратору", "📚 Частые вопросы мам", "🛍️ Товары и рецензии", "🧘 Поддержка и забота", "📢 Наши каналы", "💬 Поговорить с куратором", "ℹ️ О проекте", "👑 Админ-панель", "📋 Неотвеченные вопросы", "📈 Статистика", "📚 Управление FAQ", "➕ Создать опрос", "🔙 В главное меню"]:
-        return
-    answer = search_faq(message.text)
-    if answer:
-        await message.answer(f"📖 **Нашёл ответ:**\n\n{answer}")
-    else:
-        await message.answer("😕 Не нашёл ответа в базе. Попробуйте задать вопрос куратору через кнопку «❓ Задать вопрос куратору».")
+    await message.answer("Возврат", reply_markup=get_main_keyboard(message.from_user.id))
 
 # --- ЗАПУСК ---
 async def main():
     init_db()
     init_faq_table()
-    fill_default_faq()  # заполняем 30 вопросами
-    print("✅ Бот запущен. База знаний готова.")
+    fill_default_faq()
+    print("✅ Бот запущен!")
     print(f"👑 Администраторы: {ADMIN_IDS}")
     await dp.start_polling(bot)
 
